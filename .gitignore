@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.streamlit/
+data/raw/
+data/raw_zips/
+models/*.pkl
+!models/tfidf_vectorizer.joblib
