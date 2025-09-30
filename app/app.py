@@ -1,156 +1,197 @@
-# app/app.py — App simples para RH (Match Vaga × Candidato) — versão só com % de match
+# app/app.py  —  App de negócio para RH: Match Vaga × Candidato
 from pathlib import Path
-import json, zipfile, re
+import re
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
 from joblib import load
-from src.utils import normalize_text
 
-# ---------------- Configuração ----------------
+# ============================================================
+# Configuração da página
+# ============================================================
 st.set_page_config(page_title="Match Vaga × Candidato", layout="wide")
 
 BASE = Path(__file__).resolve().parents[1]
-DATA   = BASE / "data" / "processed"
-RAW    = BASE / "data" / "raw"
-RAWZIP = BASE / "data" / "raw_zips"
+DATA = BASE / "data" / "processed"
 MODELS = BASE / "models"
 
+# Estado global da shortlist
 if "shortlist" not in st.session_state:
     st.session_state.shortlist = []
 
-# ---------------- Utilidades ----------------
+
+# ============================================================
+# Utils
+# ============================================================
 def _clean(x):
+    """Converte NaN/None/‘nan’ em string vazia e remove espaços extras."""
     return str(x).strip() if pd.notna(x) and str(x).strip().lower() != "nan" else ""
 
+
 def _norm_id(x) -> str:
+    """Normaliza IDs (apenas letras, números, - e _)."""
     return re.sub(r"[^\dA-Za-z_-]", "", str(x))
 
-def _load_json(folder: str, fname: str):
-    p = RAW / folder / fname
-    if p.exists():
-        return json.load(open(p, "r", encoding="utf-8"))
-    z = RAWZIP / f"{folder}.zip"
-    if z.exists():
-        with zipfile.ZipFile(z, "r") as zf:
-            inside = f"{folder}/{fname}"
-            if inside in zf.namelist():
-                with zf.open(inside) as fh:
-                    return json.load(fh)
-            if fname in zf.namelist():
-                with zf.open(fname) as fh:
-                    return json.load(fh)
-    return {}
 
-def enrich_vagas_titulo(vagas_df: pd.DataFrame) -> pd.DataFrame:
-    raw = _load_json("vagas", "vagas.json")
-    out = vagas_df.copy()
-    out["vaga_id"] = out["vaga_id"].astype(str)
-    if isinstance(raw, dict) and raw:
-        rows = []
-        for vid, rec in raw.items():
-            ib = rec.get("informacoes_basicas", {}) or {}
-            rows.append({
-                "vaga_id": str(vid),
-                "titulo_raw": _clean(ib.get("titulo_vaga") or ib.get("titulo") or rec.get("titulo"))
-            })
-        raw_df = pd.DataFrame(rows)
-        out = out.merge(raw_df, on="vaga_id", how="left")
-    out["titulo_vaga"] = out.apply(
-        lambda r: _clean(r.get("titulo_vaga") or r.get("titulo_raw") or r.get("titulo") or r.get("descricao") or f"Vaga {r.get('vaga_id')}"),
-        axis=1
-    )
-    return out.drop(columns=[c for c in ["titulo_raw"] if c in out.columns])
+def normalize_text(text: str) -> str:
+    """Normaliza texto: minúsculas, remove acentos e colapsa espaços."""
+    try:
+        # usa a do projeto se existir
+        from src.utils import normalize_text as _nt
+        return _nt(text)
+    except Exception:
+        import unicodedata, re as _re
+        if text is None:
+            return ""
+        t = str(text)
+        t = unicodedata.normalize("NFKD", t)
+        t = "".join(c for c in t if not unicodedata.combining(c))
+        t = t.lower()
+        t = _re.sub(r"\s+", " ", t).strip()
+        return t
 
-def load_prospects_map() -> dict[str, list[str]]:
-    raw = _load_json("prospects", "prospects.json")
-    mp = {}
-    if isinstance(raw, dict):
-        for vaga_id, rec in raw.items():
-            ids = []
-            for p in (rec.get("prospects", []) or []):
-                code = str(p.get("codigo") or "").strip()
-                if code: ids.append(_norm_id(code))
-            if ids:
-                mp[str(vaga_id)] = ids
-    return mp
+
+def read_processed(base: str) -> pd.DataFrame:
+    """Tenta ler _mini.csv.gz → .csv.gz → .csv (nessa ordem)."""
+    for name in (f"{base}_mini.csv.gz", f"{base}.csv.gz", f"{base}.csv"):
+        p = DATA / name
+        if p.exists():
+            return pd.read_csv(p, compression="infer")
+    raise FileNotFoundError(f"Não achei {base} em {DATA} (tente *_mini.csv.gz, .csv.gz ou .csv).")
+
 
 def build_job_text(vrow: pd.Series) -> str:
-    """Monta o texto da vaga com vários fallbacks para evitar vetor zerado."""
+    """Monta o texto da vaga usando vários campos (para evitar vetor zerado)."""
     fields = [
-        "requisitos_texto", "descricao", "descricao_detalhada",
-        "responsabilidades", "atividades",
-        "stack_desejada", "stack",
-        "titulo_vaga", "titulo"
+        "requisitos_texto",
+        "descricao",
+        "descricao_detalhada",
+        "responsabilidades",
+        "atividades",
+        "stack_desejada",
+        "stack",
+        "titulo_vaga",
+        "titulo",
     ]
-    parts = [ _clean(vrow.get(f)) for f in fields if _clean(vrow.get(f)) ]
+    parts = [_clean(vrow.get(f)) for f in fields if _clean(vrow.get(f))]
     return " ".join(parts)
 
-def compute_sim_tfidf(vect, apps_df: pd.DataFrame, vaga_row: pd.Series, batch: int = 10000) -> np.ndarray:
-    """Cosseno TF-IDF com proteção a divisor zero e processamento em lotes."""
-    job_text = normalize_text(build_job_text(vaga_row))
-    B = vect.transform([job_text])                   # (1, V)
-    B_norm = float(np.sqrt(B.multiply(B).sum()))     # escalar
 
+def build_job_label(vrow: pd.Series) -> str:
+    """Rótulo do select: 'vaga_id — título' (com fallbacks)."""
+    title = _clean(vrow.get("titulo_vaga") or vrow.get("titulo") or vrow.get("descricao"))
+    if not title:
+        title = f"Vaga {vrow.get('vaga_id')}"
+    return f"{vrow.get('vaga_id')} — {title}"
+
+
+def make_prospects_map(prospects_df: pd.DataFrame) -> dict[str, set[str]]:
+    """
+    Mapeia vaga_id -> {applicant_ids} a partir do prospects.csv.
+    Tenta achar colunas plausíveis (vaga/applicant/codigo).
+    """
+    if prospects_df is None or len(prospects_df) == 0:
+        return {}
+    cols = prospects_df.columns.str.lower().tolist()
+
+    vaga_col = next((c for c in prospects_df.columns if "vaga" in c.lower()), None)
+    cand_col = next(
+        (c for c in prospects_df.columns if any(k in c.lower() for k in ["applicant", "codigo", "candidate"])),
+        None,
+    )
+    if not vaga_col or not cand_col:
+        return {}
+
+    mp: dict[str, set[str]] = {}
+    for _, r in prospects_df[[vaga_col, cand_col]].dropna().iterrows():
+        v = str(r[vaga_col])
+        a = _norm_id(r[cand_col])
+        if not a:
+            continue
+        mp.setdefault(v, set()).add(a)
+    return mp
+
+
+def compute_sim_tfidf(vect, apps_df: pd.DataFrame, vaga_row: pd.Series, batch: int = 10000) -> np.ndarray:
+    """Similaridade cosseno TF-IDF (com processamento em lotes e proteção a zero)."""
+    job_text = normalize_text(build_job_text(vaga_row))
+    B = vect.transform([job_text])  # (1, V)
+    B_norm = float(np.sqrt(B.multiply(B).sum()))
     n = len(apps_df)
     out = np.zeros(n, dtype=float)
-    if B_norm == 0.0:
-        # sem texto na vaga → todos 0%
+    if B_norm == 0.0 or n == 0:
         return out
 
-    cv_vals    = apps_df["cv_text_pt"].fillna("").astype(str).values
+    cv_vals = apps_df["cv_text_pt"].fillna("").astype(str).values
     stack_vals = apps_df["stack"].fillna("").astype(str).values
 
     for s in range(0, n, batch):
         e = min(n, s + batch)
-        texts = [ normalize_text(cv_vals[i] + " " + stack_vals[i]) for i in range(s, e) ]
-        A = vect.transform(texts)                                        # (m, V)
-        A_norm = np.sqrt(A.multiply(A).sum(axis=1)).A.ravel()            # (m,)
-        dots = (A @ B.T).A.ravel()                                       # (m,)
+        texts = [normalize_text(cv_vals[i] + " " + stack_vals[i]) for i in range(s, e)]
+        A = vect.transform(texts)
+        A_norm = np.sqrt(A.multiply(A).sum(axis=1)).A.ravel()
+        dots = (A @ B.T).A.ravel()
         out[s:e] = dots / (A_norm * B_norm + 1e-12)
     return out
 
-# ---------------- Carregamento ----------------
-@st.cache_data
+
+# ============================================================
+# Carregamento (cache)
+# ============================================================
+@st.cache_data(show_spinner=False)
 def load_data():
-    apps = pd.read_csv(DATA / "applicants.csv")
-    vagas = pd.read_csv(DATA / "vagas.csv")
-    prospects = pd.read_csv(DATA / "prospects.csv")
-    vagas = enrich_vagas_titulo(vagas)
+    apps = read_processed("applicants")
+    vagas = read_processed("vagas")
+    try:
+        prospects = read_processed("prospects")
+    except Exception:
+        prospects = pd.DataFrame()
+    # garantias de tipos
+    if "vaga_id" in vagas.columns:
+        vagas["vaga_id"] = vagas["vaga_id"].astype(str)
+    if "applicant_id" in apps.columns:
+        apps["applicant_id"] = apps["applicant_id"].astype(str)
     return apps, vagas, prospects
 
-@st.cache_resource
+
+@st.cache_resource(show_spinner=False)
 def load_vectorizer():
     return load(MODELS / "tfidf_vectorizer.joblib")
 
+
 apps, vagas, prospects = load_data()
 vect = load_vectorizer()
-prospects_map = load_prospects_map()
+prospects_map = make_prospects_map(prospects)
 
-# ---------------- UI ----------------
+# ============================================================
+# UI
+# ============================================================
 st.title("🔎 Match de Candidatos por Vaga")
 
 left, right = st.columns([1.05, 2.0], gap="large")
 
+# ---------------- Painel ESQUERDO ----------------
 with left:
     st.subheader("1) Escolha a vaga")
+    # selectbox com rótulo "vaga_id — título"
     idx = st.selectbox(
         "Código e nome da vaga",
         vagas.index,
-        format_func=lambda i: f"{vagas.loc[i,'vaga_id']} — {vagas.loc[i,'titulo_vaga'][:80]}",
+        format_func=lambda i: build_job_label(vagas.loc[i]),
     )
     vaga_row = vagas.loc[idx]
-    vaga_id = str(vaga_row["vaga_id"])
+    vaga_id = str(vaga_row.get("vaga_id"))
 
     st.subheader("2) Origem dos candidatos")
     fonte = st.radio(
         "Avaliar candidatos de:",
         ["Todos (Applicants)", "Apenas indicados a esta vaga (Prospects)"],
-        index=0
+        index=0,
     )
 
     st.subheader("3) Parâmetros")
-    topk  = st.slider("Quantidade para revisar", 10, 500, 50, step=10)
+    topk = st.slider("Quantidade para revisar", 10, 500, 50, step=10)
     thr_p = st.slider("Corte mínimo de match (%)", 0.0, 100.0, 10.0, step=1.0)
     thr = thr_p / 100.0
 
@@ -162,23 +203,28 @@ with left:
         df_sel = pd.DataFrame(st.session_state.shortlist)
         st.dataframe(
             df_sel[["ID Candidato", "Candidato", "Probabilidade de Match (%)"]],
-            use_container_width=True, height=220
+            use_container_width=True,
+            height=220,
         )
         st.download_button(
             "⬇️ Exportar selecionados (CSV)",
             df_sel.to_csv(index=False).encode("utf-8"),
             file_name="selecionados_para_entrevista.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
         )
 
+# ---------------- Painel DIREITO ----------------
 with right:
     st.subheader("4) Ranking de candidatos")
 
-    # Base de avaliação
+    # Filtragem por fonte
     if fonte.startswith("Apenas"):
         ids = set(prospects_map.get(vaga_id, []))
-        base = apps[apps["applicant_id"].astype(str).map(_norm_id).isin(ids)].copy()
+        if ids:
+            base = apps[apps["applicant_id"].astype(str).map(_norm_id).isin(ids)].copy()
+        else:
+            base = apps.iloc[0:0].copy()
         st.caption(f"Exibindo **{len(base)}** prospects indicados para a vaga.")
     else:
         base = apps.copy()
@@ -188,19 +234,25 @@ with right:
         st.warning("Nenhum candidato para avaliar.")
         st.stop()
 
-    # Scoring SOMENTE por similaridade TF-IDF (nada de modelo supervisionado)
+    # Scoring por similaridade TF-IDF
     sims = compute_sim_tfidf(vect, base, vaga_row)
     base["match_score"] = sims
     base["Probabilidade de Match (%)"] = (base["match_score"] * 100.0).map(lambda v: f"{v:.1f}%")
 
     base = base[base["match_score"] >= thr].sort_values("match_score", ascending=False)
+
+    # Info do contexto
+    try:
+        titulo = build_job_label(vaga_row).split(" — ", 1)[1]
+    except Exception:
+        titulo = vaga_id
     st.caption(
         f"Candidatos avaliados: **{len(sims)}** · "
         f"Com match ≥ **{int(thr_p)}%**: **{len(base)}** · "
-        f"Vaga: **{_clean(vaga_row.get('titulo_vaga')) or vaga_id}**"
+        f"Vaga: **{titulo}**"
     )
 
-    # ---- Cards com Nome + % + Selecionar ----
+    # ---- Cards (top 12 ou até topk) ----
     st.markdown("**Destaques**")
     cards = base.head(min(12, topk)).copy()
     cols = st.columns(3, gap="large")
@@ -208,33 +260,31 @@ with right:
         with cols[i % 3]:
             with st.container(border=True):
                 st.markdown(
-                    f"**{_clean(c.get('nome','(sem nome)'))}**  \n"
+                    f"**{_clean(c.get('nome', '(sem nome)'))}**  \n"
                     f"Prob. de match: **{c['Probabilidade de Match (%)']}**"
                 )
                 if st.button("Selecionar para entrevista", key=f"sel_{c.get('applicant_id','NA')}_{i}"):
                     row = {
-                        "ID Candidato": c.get("applicant_id",""),
-                        "Candidato": c.get("nome",""),
-                        "Probabilidade de Match (%)": c.get("Probabilidade de Match (%)",""),
-                        "vaga_id": vaga_id
+                        "ID Candidato": c.get("applicant_id", ""),
+                        "Candidato": c.get("nome", ""),
+                        "Probabilidade de Match (%)": c.get("Probabilidade de Match (%)", ""),
+                        "vaga_id": vaga_id,
                     }
                     if row not in st.session_state.shortlist:
                         st.session_state.shortlist.append(row)
 
+    # ---- Lista tabular compacta ----
     st.markdown("---")
     st.subheader("Lista compacta")
     table = base.loc[:, ["applicant_id", "nome", "Probabilidade de Match (%)"]].head(topk).copy()
-    table = table.rename(columns={
-        "applicant_id": "ID Candidato",
-        "nome": "Candidato"
-    })
+    table = table.rename(columns={"applicant_id": "ID Candidato", "nome": "Candidato"})
     st.dataframe(table, use_container_width=True, height=420)
     st.download_button(
         "⬇️ Exportar lista (CSV)",
         table.to_csv(index=False).encode("utf-8"),
         file_name="ranking_candidatos.csv",
         mime="text/csv",
-        use_container_width=True
+        use_container_width=True,
     )
 
 st.markdown("---")
