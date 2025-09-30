@@ -4,18 +4,28 @@ import numpy as np
 import json, joblib, sys
 from pathlib import Path
 
-# =========================================
-# CONFIG (sempre relativo à raiz do repo)
-# =========================================
+# ============================================================
+# CONFIG BÁSICA (relativa à raiz do repositório)
+# ============================================================
 BASE = Path.cwd()
 DATA_PROCESSED = BASE / "data" / "processed"
 DATA_RAW       = BASE / "data" / "raw"
 MODELS_DIR     = BASE / "models"
 
+# Permite imports do próprio projeto
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-# (Opcional) mesmas etapas do treino, se existirem
+# 🔧 IMPORTANTE: adiciona também a pasta models/ ao PYTHONPATH
+# para que módulos como 'utils.py' usados no treino sejam encontrados no load
+if str(MODELS_DIR) not in sys.path:
+    sys.path.insert(0, str(MODELS_DIR))
+try:
+    import utils  # noqa: F401  # força o registro do módulo, se existir
+except Exception:
+    pass
+
+# (Opcional) mesmas etapas do treino, se existirem no repo
 try:
     from src.preprocessing import basic_preprocessing
 except Exception:
@@ -27,46 +37,36 @@ except Exception:
 
 st.set_page_config(page_title="Recomendador de Match — Decision", layout="wide")
 
-# =========================================
-# CARREGAMENTO DE MODELO E META (ROBUSTO)
-# =========================================
+# ============================================================
+# CARREGAMENTO DE MODELO E META (robusto)
+# ============================================================
 MODEL_PATH_SMALL = MODELS_DIR / "recommender_small.joblib"
 MODEL_PATH_FULL  = MODELS_DIR / "recommender.pkl"
 META_PATH        = MODELS_DIR / "recommender_meta.json"
 
 def _fail_with_hint(msg: str):
-    hint = ""
     low = msg.lower()
     if "xgboost" in low or "xgb" in low:
-        hint = (
-            "Parece que o modelo foi treinado com **XGBoost** e o pacote não está instalado "
-            "(ou a versão diverge). Adicione `xgboost==2.1.1` no **requirements.txt** e faça o redeploy."
-        )
+        hint = "Adicione `xgboost==2.1.1` no requirements.txt e redeploy."
     elif "sklearn" in low or "scikit" in low:
-        hint = (
-            "Possível incompatibilidade de versão do **scikit-learn**. "
-            "Tente fixar `scikit-learn==1.4.2` (junto de `joblib==1.3.2`, `numpy==1.26.4`, `pandas==2.2.2`) "
-            "no **requirements.txt** e refaça o deploy."
-        )
+        hint = ("Possível incompatibilidade do scikit-learn. "
+                "Fixe `scikit-learn==1.4.2`, `joblib==1.3.2`, `numpy==1.26.4`, `pandas==2.2.2` no requirements.txt.")
+    elif "can't get attribute" in low and "utils" in low:
+        hint = ("O modelo referencia objetos do módulo `utils`. Já adicionei `models/` ao PYTHONPATH, "
+                "garanta que `models/utils.py` esteja no repo e com o mesmo nome usado no treino.")
     else:
-        hint = (
-            "Verifique se **models/recommender_small.joblib** (ou **recommender.pkl**) "
-            "foi treinado com bibliotecas que estão no seu **requirements.txt**."
-        )
-
+        hint = ("Verifique se o modelo foi treinado com as mesmas libs do requirements.txt "
+                "e se módulos auxiliares (ex.: utils.py) estão versionados.")
     st.error(f"Não foi possível carregar o modelo.\n\nDetalhe: {msg}\n\n{hint}")
     st.stop()
 
 @st.cache_resource
 def load_artifacts():
-    # meta é obrigatório
     if not META_PATH.exists():
-        st.error("Artefatos do modelo ausentes. Envie **models/recommender_meta.json** e o arquivo do modelo treinado.")
+        st.error("Artefatos do modelo não encontrados. Inclua em 'models/' o arquivo 'recommender_meta.json' e o modelo treinado.")
         st.stop()
-
-    # tenta modelo compactado, depois o completo
     last_err = None
-    for path in [MODEL_PATH_SMALL, MODEL_PATH_FULL]:
+    for path in (MODEL_PATH_SMALL, MODEL_PATH_FULL):
         if path.exists():
             try:
                 pipe = joblib.load(path)
@@ -75,9 +75,8 @@ def load_artifacts():
                 return pipe, meta
             except Exception as e:
                 last_err = e
-
     if last_err is None:
-        st.error("Arquivo de modelo não encontrado em **models/**. Envie `recommender_small.joblib` ou `recommender.pkl`.")
+        st.error("Arquivo de modelo não encontrado em 'models/'. Envie 'recommender_small.joblib' ou 'recommender.pkl'.")
         st.stop()
     else:
         _fail_with_hint(str(last_err))
@@ -87,9 +86,9 @@ BEST_THR = float(meta.get("best_threshold", 0.5))
 NUM_COLS = list(meta.get("num_cols", []))
 CAT_COLS = list(meta.get("cat_cols", []))
 
-# =========================================
+# ============================================================
 # HELPERS DE I/O E PRÉP
-# =========================================
+# ============================================================
 def _first_existing(cands):
     for p in cands:
         p = Path(p)
@@ -128,9 +127,9 @@ def _ensure_feature_columns(df: pd.DataFrame, num_cols, cat_cols):
             df[c] = ""
     return df
 
-# =========================================
-# DADOS: dataset mínimo (preferido) ou merge dos 3 CSVs
-# =========================================
+# ============================================================
+# DADOS: dataset mínimo (preferido) ou junção dos 3 CSVs
+# ============================================================
 MIN_CSV = DATA_PROCESSED / "app_inference.min.csv.gz"
 
 @st.cache_data
@@ -161,7 +160,7 @@ def load_merged_df():
         BASE           / "prospects_vf.csv",
     ])
     if not all([vagas_path, apps_path, pros_path]):
-        st.error("CSV(s) de **vagas/applicants/prospects** não encontrados no repositório.")
+        st.error("CSV(s) de vagas/applicants/prospects não encontrados no repositório.")
         st.stop()
 
     df_vagas = _read_csv_any(vagas_path)
@@ -212,9 +211,9 @@ def load_data():
 
 df = load_data()
 
-# =========================================
+# ============================================================
 # DETECÇÃO: chave e título da vaga
-# =========================================
+# ============================================================
 JOB_KEY_CANDS   = ["job_id"]
 JOB_TITLE_CANDS = ["job__título_vaga","job__titulo_vaga","job__titulo","job__nome","job__descricao","job__descricao_vaga"]
 
@@ -228,9 +227,9 @@ if key_col is None:
     st.error("Coluna de identificação da vaga (job_id) não encontrada.")
     st.stop()
 
-# =========================================
+# ============================================================
 # UI — simples e executiva
-# =========================================
+# ============================================================
 st.title("🔎 Recomendador de Match — Decision")
 st.caption("Selecione a vaga e veja os candidatos com maior probabilidade de match.")
 
@@ -260,9 +259,9 @@ label_to_key = dict(zip(jobs["__label__"], jobs["__key__"]))
 opcoes = ["-"] + sorted(jobs["__label__"].tolist())
 vaga_label = st.selectbox("Selecione a vaga:", options=opcoes, index=0)
 
-# =========================================
+# ============================================================
 # Filtro e inferência
-# =========================================
+# ============================================================
 df_view = df.copy()
 if vaga_label != "-":
     vaga_key = label_to_key[vaga_label]
