@@ -1,17 +1,6 @@
-# Data bruto e grandes
-data/raw/
-data/processed/*.csv
-data/processed/*.parquet
-!data/processed/app_inference.min.csv.gz
-
-# Modelos grandes (mantém só os compactos)
+# MODELOS
 models/*.pkl
 models/*.joblib
 !models/recommender_small.joblib
-models/*.json
-
-# Artifacts temporários
-**/.ipynb_checkpoints/
-*.zip
-*.7z
-*.rar
+# mantenha o meta no repo (não ignore)
+!models/recommender_meta.json
