@@ -1,0 +1,21 @@
+{
+  "best_threshold": 0.25532734394073486,
+  "metrics": {
+    "AUC": 0.7758,
+    "F1@0.5": 0.2933,
+    "BestThreshold": 0.25532734394073486,
+    "F1@Best": 0.5187
+  },
+  "num_cols": [
+    "prospect_comment_len",
+    "prospect__prospect_comment_len",
+    "feat_skill_overlap",
+    "feat_senioridade",
+    "feat_senioridade_gap"
+  ],
+  "cat_cols": [
+    "job__nivel_profissional"
+  ],
+  "group_col": "job__nome",
+  "job_title_col": "job__nome"
+}
