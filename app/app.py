@@ -1,29 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
-import joblib
+import json, joblib, sys
 from pathlib import Path
-import sys
 
 # ============================================================
-# CONFIGURAÇÕES DO PROJETO  (ajuste BASE se necessário)
+# CONFIG BÁSICA (sempre relativo à raiz do repositório)
 # ============================================================
-BASE = Path(r"C:\Users\dphat\OneDrive\Documentos\Cursos\FIAP\PosTech_DataAnalytics\fase5\Datathon Decision")
+BASE = Path.cwd()
 DATA_PROCESSED = BASE / "data" / "processed"
-DATA_RAW = BASE / "data" / "raw"
-MODELS_DIR = BASE / "models"
+DATA_RAW       = BASE / "data" / "raw"
+MODELS_DIR     = BASE / "models"
 
 # Permite imports locais "from src import ..."
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-# Etapas iguais às do treino (se disponíveis)
+# (Opcional) mesmas etapas do treino, se existirem no repo
 try:
     from src.preprocessing import basic_preprocessing
 except Exception:
     basic_preprocessing = None
-
 try:
     from src.feature_engineering import make_features
 except Exception:
@@ -41,31 +38,32 @@ META_PATH        = MODELS_DIR / "recommender_meta.json"
 @st.cache_resource
 def load_artifacts():
     if not META_PATH.exists():
-        st.error("Artefatos do modelo não encontrados. Por favor, realize o treino antes de usar a aplicação.")
+        st.error("Artefatos do modelo não encontrados. Inclua em 'models/' o arquivo 'recommender_meta.json' e o modelo treinado.")
         st.stop()
     if MODEL_PATH_SMALL.exists():
         pipe = joblib.load(MODEL_PATH_SMALL)
     elif MODEL_PATH_FULL.exists():
         pipe = joblib.load(MODELS_DIR / "recommender.pkl")
     else:
-        st.error("Modelo não encontrado. Por favor, realize o treino antes de usar a aplicação.")
+        st.error("Modelo não encontrado em 'models/'. Envie 'recommender_small.joblib' ou 'recommender.pkl'.")
         st.stop()
     with open(META_PATH, "r", encoding="utf-8") as f:
         meta = json.load(f)
     return pipe, meta
 
 pipe, meta = load_artifacts()
-best_thr = float(meta.get("best_threshold", 0.5))
+BEST_THR = float(meta.get("best_threshold", 0.5))
 NUM_COLS = list(meta.get("num_cols", []))
 CAT_COLS = list(meta.get("cat_cols", []))
 
 # ============================================================
-# HELPERS
+# HELPERS DE I/O E PRÉP
 # ============================================================
 def _first_existing(cands):
     for p in cands:
-        if p and Path(p).exists():
-            return Path(p)
+        p = Path(p)
+        if p.exists():
+            return p
     return None
 
 def _read_csv_any(path: Path) -> pd.DataFrame:
@@ -113,6 +111,7 @@ def load_min_df():
 
 @st.cache_data
 def load_merged_df():
+    # Localiza arquivos (processed -> raw -> raiz)
     vagas_path = _first_existing([
         DATA_PROCESSED / "vaga_vf.csv",
         DATA_PROCESSED / "vagas_vf.csv",
@@ -132,14 +131,14 @@ def load_merged_df():
         BASE           / "prospects_vf.csv",
     ])
     if not all([vagas_path, apps_path, pros_path]):
-        st.error("Arquivos CSV não encontrados (vagas/applicants/prospects). Verifique se estão descompactados.")
+        st.error("Arquivos CSV não encontrados (vagas/applicants/prospects). Verifique se estão descompactados no repositório.")
         st.stop()
 
     df_vagas = _read_csv_any(vagas_path)
     df_apps  = _read_csv_any(apps_path)
     df_pros  = _read_csv_any(pros_path)
 
-    # normaliza chaves
+    # Normaliza chaves -> job_id / applicant_id
     job_key_vagas = _pick(df_vagas, ["job_id","jobId","id_vaga","vaga_id","id"])
     job_key_pros  = _pick(df_pros,  ["job_id","jobId","id_vaga","vaga_id","id"])
     app_key_apps  = _pick(df_apps,  ["applicant_id","appId","id_candidato","candidato_id","id"])
@@ -150,16 +149,19 @@ def load_merged_df():
     if app_key_apps  and app_key_apps  != "applicant_id": df_apps = df_apps.rename(columns={app_key_apps:"applicant_id"})
     if app_key_pros  and app_key_pros  != "applicant_id": df_pros = df_pros.rename(columns={app_key_pros:"applicant_id"})
 
-    # prefixo para evitar colisões
+    # Prefixa para evitar colisão
     vagas_pref = _prefix_except_keys(df_vagas, "job__", ["job_id"])
     apps_pref  = _prefix_except_keys(df_apps,  "app__", ["applicant_id"])
     pros_pref  = _prefix_except_keys(df_pros,  "prospect__", ["job_id","applicant_id"])
 
-    # merge
-    df = pros_pref.merge(vagas_pref, on="job_id", how="left").merge(apps_pref, on="applicant_id", how="left")
+    # Merge: prospects × vagas × applicants
+    tmp = pros_pref.merge(vagas_pref, on="job_id", how="left")
+    df = tmp.merge(apps_pref, on="applicant_id", how="left")
+
+    # ID único da relação vaga×candidato
     df["pair_id"] = df["job_id"].astype("string") + "::" + df["applicant_id"].astype("string")
 
-    # aplica mesmo PRÉ + FEAT (se disponíveis)
+    # Aplica o mesmo PRÉ + FEAT do treino, se disponíveis
     if basic_preprocessing is not None:
         try:
             df = basic_preprocessing(df)
@@ -185,7 +187,7 @@ df = load_data()
 
 # ============================================================
 # DETECÇÃO: chave e título da vaga
-#   — título vem de 'título_vaga' no CSV de vagas → 'job__título_vaga'
+#   — título vem de 'título_vaga' no CSV de vagas → 'job__título_vaga' (ou 'job__titulo_vaga')
 # ============================================================
 JOB_KEY_CANDS   = ["job_id"]
 JOB_TITLE_CANDS = ["job__título_vaga","job__titulo_vaga","job__titulo","job__nome","job__descricao","job__descricao_vaga"]
@@ -201,15 +203,15 @@ if key_col is None:
     st.stop()
 
 # ============================================================
-# UI — cabeçalho e controles
+# UI — cabeçalho e controles simples
 # ============================================================
 st.title("🔎 Recomendador de Match — Decision")
 st.caption("Selecione a vaga e visualize os candidatos com maior probabilidade de match.")
 
 with st.sidebar:
     st.header("Opções")
-    thr = st.slider("Threshold de decisão", 0.0, 1.0, value=float(best_thr), step=0.01,
-                    help="Aumente para priorizar precisão; diminua para priorizar abrangência.")
+    thr = st.slider("Threshold de decisão", 0.0, 1.0, value=BEST_THR, step=0.01,
+                    help="Aumente para priorizar precisão; diminua para aumentar a abrangência.")
     top_n = st.number_input("Quantidade a exibir (Top-N)", min_value=1, max_value=1000, value=50, step=1)
     only_above = st.checkbox("Mostrar apenas acima do threshold", value=False)
 
@@ -235,7 +237,7 @@ opcoes = ["-"] + sorted(jobs["__label__"].tolist())
 vaga_label = st.selectbox("Selecione a vaga:", options=opcoes, index=0)
 
 # ============================================================
-# Filtro e preparação para inferência
+# Filtro & features para inferência
 # ============================================================
 df_view = df.copy()
 if vaga_label != "-":
@@ -259,7 +261,7 @@ df_view["proba_match"] = proba
 df_view["pred@thr"] = (df_view["proba_match"] >= thr).astype(int)
 
 # ============================================================
-# Métricas rápidas + Tabela de ranking
+# Indicadores executivos + Tabela de ranking
 # ============================================================
 total = len(df_view)
 acima = int((df_view["pred@thr"] == 1).sum())
@@ -281,10 +283,7 @@ if only_above:
 df_rank = df_rank.loc[:, ~df_rank.columns.duplicated()].copy()
 
 st.subheader("🧑‍💼 Ranking de candidatos")
-st.dataframe(
-    df_rank[display_cols].head(int(top_n)).reset_index(drop=True),
-    use_container_width=True
-)
+st.dataframe(df_rank[display_cols].head(int(top_n)).reset_index(drop=True), use_container_width=True)
 
 # ============================================================
 # Download
