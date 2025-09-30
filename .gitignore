@@ -1,8 +1,17 @@
-__pycache__/
-*.pyc
-.venv/
-.streamlit/
+# Data bruto e grandes
 data/raw/
-data/raw_zips/
+data/processed/*.csv
+data/processed/*.parquet
+!data/processed/app_inference.min.csv.gz
+
+# Modelos grandes (mantém só os compactos)
 models/*.pkl
-!models/tfidf_vectorizer.joblib
+models/*.joblib
+!models/recommender_small.joblib
+models/*.json
+
+# Artifacts temporários
+**/.ipynb_checkpoints/
+*.zip
+*.7z
+*.rar
